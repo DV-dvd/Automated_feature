@@ -4,6 +4,7 @@ from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 from sklearn.model_selection import train_test_split
 from scipy.stats import chi2_contingency, pearsonr
+import matplotlib
 import matplotlib.pyplot as plt
 import seaborn as sns
 import toad
@@ -17,6 +18,7 @@ from sklearn.feature_selection import mutual_info_classif
 # import statsmodels.api as sm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from optbinning import OptimalBinning
 
 warnings.filterwarnings('ignore')
 
@@ -34,8 +36,8 @@ class AutoFeatureScreener:
         os.makedirs(self.config['result_path'] + '/monthly', exist_ok=True)
 
 
-
         # 初始化参数
+        self.target = self.config['target_name']
         self.missing_rate = self.config['missing_rate']
         self.iv_rate = self.config['iv_rate']
         self.psi_rate = self.config['psi_rate']
@@ -47,7 +49,6 @@ class AutoFeatureScreener:
         self.psi_month_std = self.config['psi_month_std']
         self.mean_month_std = self.config['mean_month_std']
         self.if_scorecard = self.config['if_scorecard']
-        self.target = self.config['target_name']
         self.time_column = self.config['time_column']
         self.dimensions = self.config['dimensions']
 
@@ -64,22 +65,29 @@ class AutoFeatureScreener:
     def load_data(self):
         """加载标签和特征数据"""
         # 读取标签数据
-        df_label = pd.read_csv(
-            self.config['path']['label_path'],
-            dtype={"serial_id": 'str'}
-        )
-
-        # 读取特征数据
-        df_feature = pd.read_csv(
-            self.config['path']['feature_path'],
-            dtype={"serial_id": 'str'}
-        )
-
-        # 合并数据
-        self.df = pd.merge(df_label, df_feature, on="serial_id", how="inner")
-
+        if self.config['path']['merge_file_path'] == 'None':
+            # 如果没有合并文件路径，则分别读取标签和特征数据
+            df_label = pd.read_csv(
+                self.config['path']['label_path'],
+                dtype={"serial_id": 'str'}
+            )
+            # 读取特征数据
+            df_feature = pd.read_csv(
+                self.config['path']['feature_path'],
+                dtype={"serial_id": 'str'}
+            )
+            # 合并数据
+            self.df = pd.merge(df_label, df_feature, on="serial_id", how="inner")
+        else:
+            # 读取合并后的数据
+            self.df = pd.read_csv(
+                self.config['path']['merge_file_path'],
+            )
         # 确保目标变量是二元分类
         self.df = self.df[self.df[self.target].isin([0, 1])]
+        to_drop_list = self.config['path']['to_drop_list']
+        y_label_list = [y for y in self.config['path']['y_label_list'] if y != self.target]
+        self.df.drop(columns=to_drop_list+y_label_list, inplace=True)
 
         # 转换时间列
         # self.df[self.time_column] = pd.to_datetime(self.df[self.time_column])
@@ -135,7 +143,7 @@ class AutoFeatureScreener:
         """计算PSI值"""
         psi_values = {}
         # 划分训练集和OOT（最近一个月作为OOT）
-        oot_start = sorted(df[self.time_column].unique())[-2]
+        oot_start = sorted(df[self.time_column].unique())[-3]
 
         train_df = df[df[self.time_column] < oot_start]
         oot_df = df[df[self.time_column] >= oot_start]
@@ -322,7 +330,7 @@ class AutoFeatureScreener:
         df = self.preprocess_data(self.df.copy())
 
         # 划分TRN和OOT（最近一个月作为OOT）
-        oot_start = sorted(df[self.time_column].unique())[-2]
+        oot_start = sorted(df[self.time_column].unique())[-3]
 
         train_df = df[df[self.time_column] < oot_start]
         oot_df = df[df[self.time_column] >= oot_start]
@@ -339,7 +347,52 @@ class AutoFeatureScreener:
         # 保存结果
         if results:
             results_df = pd.DataFrame(results)
-            results_df.to_csv(f"{self.config['result_path']}/trn_oot_results.csv", index=False)
+            processed_data = []
+            feature_stats_list  = results
+            for feature_dict in feature_stats_list:
+                feature_name = feature_dict['feature']
+                monotonic_train = feature_dict['monotonic_train']
+                monotonic_oot = feature_dict['monotonic_oot']
+                distribution_diff = feature_dict['distribution_diff']
+
+                # 处理训练集统计数据
+                for train_stat in feature_dict['train_stats']:
+                    row = {
+                        'feature': feature_name,
+                        'data_type': 'train',
+                        'monotonic': monotonic_train,
+                        'distribution_diff': distribution_diff,
+                        'bin': train_stat['bin'],
+                        'total': train_stat['total'],
+                        'bad_count': train_stat['bad_count'],
+                        'bad_rate': train_stat['bad_rate'],
+                        'good_count': train_stat['good_count'],
+                        'good_rate': train_stat['good_rate'],
+                        'perc': train_stat['perc'],
+                        'lift': train_stat['lift']
+                    }
+                    processed_data.append(row)
+
+                # 处理OOT（跨时间）统计数据
+                for oot_stat in feature_dict['oot_stats']:
+                    row = {
+                        'feature': feature_name,
+                        'data_type': 'oot',
+                        'monotonic': monotonic_oot,
+                        'distribution_diff': distribution_diff,
+                        'bin': oot_stat['bin'],
+                        'total': oot_stat['total'],
+                        'bad_count': oot_stat['bad_count'],
+                        'bad_rate': oot_stat['bad_rate'],
+                        'good_count': oot_stat['good_count'],
+                        'good_rate': oot_stat['good_rate'],
+                        'perc': oot_stat['perc'],
+                        'lift': oot_stat['lift']
+                    }
+                    processed_data.append(row)
+            results_df2 = pd.DataFrame(processed_data)
+            results_df2.to_csv(f"{self.config['result_path']}/trn_oot/trn_oot_results.csv", index=False)
+
             self.results['trn_oot_screening'] = results_df
 
             # 筛选满足条件的特征
@@ -350,7 +403,7 @@ class AutoFeatureScreener:
                 ]['feature'].tolist()
 
             pd.DataFrame({'feature': passed_features}).to_csv(
-                f"{self.config['result_path']}/selected_features_trn_oot.csv", index=False
+                f"{self.config['result_path']}/trn_oot/selected_features_trn_oot.csv", index=False
             )
 
             print(f"次筛阶段完成! 原始特征数 {len(selected_features)}，保留特征数 {len(passed_features)}")
@@ -358,55 +411,72 @@ class AutoFeatureScreener:
             print("次筛阶段未产生有效结果")
 
     def analyze_feature_trn_oot(self, feature, train_df, oot_df):
-        """分析单个特征在TRN和OOT上的表现"""
+        """分析特征在TRN和OOT上的表现（分箱策略根据模型类型自适应）"""
         try:
-            # 分箱处理
-            if train_df[feature].nunique() > 10:
+            # ==================== 分箱策略选择 ====================
+            if self.if_scorecard:
+                # 评分卡模型：使用WOE分箱（toad库）
                 combiner = toad.transform.Combiner()
-                combiner.fit(train_df[[feature, self.target]], train_df[self.target], method='chi', min_samples=0.05)
+                combiner.fit(train_df[[feature, self.target]],
+                             train_df[self.target],
+                             method='chi',  # 卡方分箱
+                             min_samples=0.15)  # 每箱最小样本占比
                 bins = combiner.export()
 
+                # 应用分箱
                 train_df['bin'] = combiner.transform(train_df[[feature]])
                 oot_df['bin'] = combiner.transform(oot_df[[feature]])
             else:
-                train_df['bin'] = train_df[feature]
-                oot_df['bin'] = oot_df[feature]
+                # 非评分卡模型：使用OptimalBinning（确保单调性）
+                optb = OptimalBinning(
+                    name=feature,
+                    dtype="numerical" if train_df[feature].dtype in ['float64', 'int64'] else "categorical",
+                    monotonic_trend="auto", # 自动判断单调方向
+                    max_n_bins= 5,
+                    solver="cp"  # 使用整数规划保证单调性
+                )
+                optb.fit(train_df[feature].values, train_df[self.target].values)
 
-            # 计算TRN分箱统计
+                # 应用分箱
+                train_df['bin'] = optb.transform(train_df[feature].values, metric="bins")
+                oot_df['bin'] = optb.transform(oot_df[feature].values, metric="bins")
+
+                # 获取分箱边界
+                bins = optb.splits  # 数值型返回分割点，类别型返回分组
+
+            # 分箱统计计算
             train_stats = self.calculate_bin_stats(train_df, feature)
-            # 计算OOT分箱统计
             oot_stats = self.calculate_bin_stats(oot_df, feature)
-
-            # 检查单调性
+            # 剔除掉Missing分箱，避免后续报错
+            oot_stats = [item for item in oot_stats if item['bin'] != 'Missing']
+            train_stats = [item for item in train_stats if item['bin'] != 'Missing']
+            # 单调性验证
             monotonic_train = self.check_monotonicity(train_stats)
             monotonic_oot = self.check_monotonicity(oot_stats)
 
-            # 计算分布差异
-            distribution_diff = self.calculate_distribution_diff(train_stats, oot_stats)
-
-            # 对于评分卡模型，计算WOE
-            woe_train = None
-            woe_oot = None
+            # 评分卡专用处理
+            woe_train = woe_oot = None
             if self.if_scorecard:
                 woe_train = self.calculate_woe(train_stats)
                 woe_oot = self.calculate_woe(oot_stats)
 
-            # 可视化分箱结果
+            # 可视化
             self.visualize_bin_results(feature, train_stats, oot_stats)
 
             return {
                 'feature': feature,
                 'monotonic_train': 'Yes' if monotonic_train else 'No',
                 'monotonic_oot': 'Yes' if monotonic_oot else 'No',
-                'distribution_diff': distribution_diff,
-                'train_stats': json.dumps(train_stats),
-                'oot_stats': json.dumps(oot_stats),
-                'woe_train': json.dumps(woe_train) if woe_train else None,
-                'woe_oot': json.dumps(woe_oot) if woe_oot else None
+                'distribution_diff': self.calculate_distribution_diff(train_stats, oot_stats),
+                'train_stats': train_stats,
+                'oot_stats': oot_stats,
+                'woe_train': woe_train,
+                'woe_oot': woe_oot,
+                'bins': bins  # 返回分箱边界用于审计
             }
 
         except Exception as e:
-            print(f"分析特征 {feature} 时出错: {str(e)}")
+            print(f"特征 {feature} 分析失败: {str(e)}")
             return None
 
     def calculate_bin_stats(self, df, feature):
@@ -454,36 +524,87 @@ class AutoFeatureScreener:
         return stats
 
     def visualize_bin_results(self, feature, train_stats, oot_stats):
-        """可视化分箱结果"""
-        fig = make_subplots(rows=2, cols=1,
-                            subplot_titles=('TRN分箱统计', 'OOT分箱统计'),
-                            vertical_spacing=0.15)
+        """使用Matplotlib静默保存分箱结果图（不显示）"""
+        # 设置Agg后端（不显示图形）
+        matplotlib.use('Agg')  # 必须在其他matplotlib导入前设置
 
-        # TRN分箱结果
-        bins = [str(bin['bin']) for bin in train_stats]
-        fig.add_trace(go.Bar(x=bins, y=[bin['perc'] for bin in train_stats],
-                             name='分箱占比', marker_color='blue'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=bins, y=[bin['bad_rate'] for bin in train_stats],
-                                 name='坏账率', mode='lines+markers', yaxis='y2'), row=1, col=1)
+        # 统一分箱标签（处理可能的Missing）
+        def get_common_bins(stats):
+            bins = set()
+            for bin_data in stats:
+                bin_name = 'Missing' if pd.isna(bin_data['bin']) else str(bin_data['bin'])
+                bins.add(bin_name)
+            return sorted(bins, key=lambda x: (x == 'Missing', x))  # Missing放最后
 
-        # OOT分箱结果
-        fig.add_trace(go.Bar(x=bins, y=[bin['perc'] for bin in oot_stats],
-                             name='分箱占比', marker_color='green'), row=2, col=1)
-        fig.add_trace(go.Scatter(x=bins, y=[bin['bad_rate'] for bin in oot_stats],
-                                 name='坏账率', mode='lines+markers', yaxis='y2'), row=2, col=1)
+        # 获取统一的bin顺序
+        common_bins = get_common_bins(train_stats + oot_stats)
 
-        # 更新布局
-        fig.update_layout(
-            title=f"特征分析: {feature}",
-            height=800,
-            showlegend=False,
-            yaxis=dict(title='分箱占比'),
-            yaxis2=dict(title='坏账率', overlaying='y', side='right'),
-            yaxis3=dict(title='分箱占比'),
-            yaxis4=dict(title='坏账率', overlaying='y3', side='right')
-        )
+        # 构建统一的数据结构（填充可能缺失的分箱）
+        def build_consistent_data(stats, common_bins):
+            data = {'perc': [], 'bad_rate': []}
+            bin_map = {'Missing' if pd.isna(b['bin']) else str(b['bin']): b for b in stats}
 
-        fig.write_html(f"{self.config['result_path']}/{feature}_bin_analysis.html")
+            for bin_name in common_bins:
+                if bin_name in bin_map:
+                    data['perc'].append(bin_map[bin_name]['perc'])
+                    data['bad_rate'].append(bin_map[bin_name]['bad_rate'])
+                else:
+                    data['perc'].append(0)  # 缺失分箱补零
+                    data['bad_rate'].append(np.nan)  # 坏账率标记为nan
+            return data
+
+        train_data = build_consistent_data(train_stats, common_bins)
+        oot_data = build_consistent_data(oot_stats, common_bins)
+
+        # 创建图形
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+        fig.suptitle(f"特征分箱分析: {feature}", fontsize=14)
+
+        # ========== TRN分箱结果 ==========
+        # 分箱占比柱状图
+        bars1 = ax1.bar(common_bins, train_data['perc'],
+                        color='royalblue', alpha=0.6, label='分箱占比')
+        ax1.set_ylabel('分箱占比', fontsize=10)
+        ax1.set_title("TRN分箱统计", pad=10)
+
+        # 坏账率折线图（次坐标）
+        ax1_sec = ax1.twinx()
+        line1 = ax1_sec.plot(common_bins, train_data['bad_rate'],
+                             'r-o', linewidth=2, markersize=6, label='坏账率')
+        ax1_sec.set_ylabel('坏账率', fontsize=10)
+
+        # 处理NaN显示（虚线连接）
+        if any(np.isnan(train_data['bad_rate'])):
+            ax1_sec.plot(common_bins, train_data['bad_rate'], 'r--', alpha=0.3)  # 虚线辅助线
+
+        # ========== OOT分箱结果 ==========
+        # 分箱占比柱状图
+        bars2 = ax2.bar(common_bins, oot_data['perc'],
+                        color='forestgreen', alpha=0.6, label='分箱占比')
+        ax2.set_ylabel('分箱占比', fontsize=10)
+        ax2.set_title("OOT分箱统计", pad=10)
+
+        # 坏账率折线图（次坐标）
+        ax2_sec = ax2.twinx()
+        line2 = ax2_sec.plot(common_bins, oot_data['bad_rate'],
+                             'r-o', linewidth=2, markersize=6, label='坏账率')
+        ax2_sec.set_ylabel('坏账率', fontsize=10)
+
+        # 处理NaN显示
+        if any(np.isnan(oot_data['bad_rate'])):
+            ax2_sec.plot(common_bins, oot_data['bad_rate'], 'r--', alpha=0.3)
+
+        # 统一调整图形
+        for ax in [ax1, ax2]:
+            ax.tick_params(axis='x', rotation=45)  # x轴标签旋转
+
+        plt.tight_layout()
+
+        # 保存图片
+        output_path = f"{self.config['result_path']}/trn_oot/{feature}_bin_analysis.png"
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+
 
     def monthly_stability(self):
         """终筛：by 月观察每个变量的稳定性"""
@@ -660,7 +781,7 @@ class AutoFeatureScreener:
 
 if __name__ == "__main__":
     # 初始化特征筛选器
-    screener = AutoFeatureScreener("config.json")
+    screener = AutoFeatureScreener("./config/config.json")
 
     # 执行完整流程
     screener.run()
