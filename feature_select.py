@@ -21,7 +21,7 @@ from plotly.subplots import make_subplots
 from optbinning import OptimalBinning
 
 warnings.filterwarnings('ignore')
-
+pd.set_option('display.max_columns',None)
 
 class AutoFeatureScreener:
     def __init__(self, config_path):
@@ -32,8 +32,11 @@ class AutoFeatureScreener:
         # 创建结果目录
         os.makedirs(self.config['result_path'], exist_ok=True)
         os.makedirs(self.config['result_path']+'/init', exist_ok=True)
+        os.makedirs(self.config['result_path'] + '/init/fig', exist_ok=True)
         os.makedirs(self.config['result_path'] + '/trn_oot', exist_ok=True)
+        os.makedirs(self.config['result_path'] + '/trn_oot/fig', exist_ok=True)
         os.makedirs(self.config['result_path'] + '/monthly', exist_ok=True)
+        os.makedirs(self.config['result_path'] + '/monthly/fig', exist_ok=True)
 
 
         # 初始化参数
@@ -51,6 +54,8 @@ class AutoFeatureScreener:
         self.if_scorecard = self.config['if_scorecard']
         self.time_column = self.config['time_column']
         self.dimensions = self.config['dimensions']
+        self.train_month = self.config['train_month']
+        self.oot_month = self.config['oot_month']
 
         # 加载数据
         self.load_data()
@@ -85,8 +90,8 @@ class AutoFeatureScreener:
             )
         # 确保目标变量是二元分类
         self.df = self.df[self.df[self.target].isin([0, 1])]
-        to_drop_list = self.config['path']['to_drop_list']
-        y_label_list = [y for y in self.config['path']['y_label_list'] if y != self.target]
+        to_drop_list = self.config['to_drop_list']
+        y_label_list = [y for y in self.config['y_label_list'] if y != self.target]
         self.df.drop(columns=to_drop_list+y_label_list, inplace=True)
 
         # 转换时间列
@@ -134,10 +139,14 @@ class AutoFeatureScreener:
         return pd.Series(xgb.feature_importances_, index=X.columns)
 
     def calculate_target_corr(self, df, features):
-        """计算与目标变量的相关性"""
-        corr_values = df[features + [self.target]].corr()[[self.target]].sort_values(by=self.target, ascending=False)
-        corr_values = corr_values[corr_values.index != self.target]
-        return corr_values[self.target]
+        try:
+            """计算与目标变量的相关性"""
+            corr_values = df[features + [self.target]].corr()[[self.target]].sort_values(by=self.target, ascending=False)
+            corr_values = corr_values[corr_values.index != self.target]
+            return corr_values[self.target]
+        except Exception as e:
+            print(f"计算目标相关性时出错: {str(e)}")
+            print(f'第一个变量为{features[0]}')
 
     def calculate_psi(self, df, features):
         """计算PSI值"""
@@ -167,14 +176,14 @@ class AutoFeatureScreener:
 
             for col in corr_matrix.columns:
                 high_corr = corr_matrix.index[upper[col] > self.var_corr_rate].tolist()
-            if high_corr:
-            # 在高度相关的变量中，保留IV最高的
-                high_corr_iv = iv_scores[high_corr]
-            max_iv_feature = high_corr_iv.idxmax()
-            to_remove = [x for x in high_corr if x != max_iv_feature]
-            to_drop.extend(to_remove)
+                if high_corr:
+                # 在高度相关的变量中，保留IV最高的
+                    high_corr_iv = iv_scores[high_corr + [col]]
+                    max_iv_feature = high_corr_iv.idxmax()
+                    to_remove = [x for x in high_corr if x != max_iv_feature]
+                    to_drop.extend(to_remove)
 
-            to_drop = list(set(to_drop))
+                to_drop = list(set(to_drop))
             features_to_keep = [f for f in features if f not in to_drop]
         else:
             # 如果只有一个特征，直接保留
@@ -222,15 +231,15 @@ class AutoFeatureScreener:
             filtered_features = results_df[
                 (results_df['iv'] >= self.iv_rate) &
                 (results_df['importance'] >= self.importance_rate) &
-                (results_df['target_corr'] >= self.target_corr_rate) &
+                (abs(results_df['target_corr']) >= self.target_corr_rate) &
                 (results_df['psi'] <= self.psi_rate)
                 ]['feature'].tolist()
 
             print(f"阈值筛选: 原始特征数 {len(features)}，保留特征数 {len(filtered_features)}")
 
             # 高相关性过滤
-            if filtered_features:
-                filtered_features = self.filter_high_correlation(df, filtered_features, iv_scores)
+            # if filtered_features:
+            #     filtered_features = self.filter_high_correlation(df, filtered_features, iv_scores)
 
             # 保存结果
             self.results['initial_screening'][dim_name] = {
@@ -281,7 +290,7 @@ class AutoFeatureScreener:
         plt.axvline(x=self.psi_rate, color='r', linestyle='--')
 
         plt.tight_layout()
-        plt.savefig(f"{self.config['result_path']}/init/{dim_name}_initial.png")
+        plt.savefig(f"{self.config['result_path']}/init/fig/{dim_name}_initial.png")
         plt.close()
 
         # 保存筛选后的特征
@@ -329,11 +338,11 @@ class AutoFeatureScreener:
         # 数据预处理
         df = self.preprocess_data(self.df.copy())
 
-        # 划分TRN和OOT（最近一个月作为OOT）
-        oot_start = sorted(df[self.time_column].unique())[-3]
+        # 划分TRN和OOT（最近三个月作为OOT）
+        # oot_start = sorted(df[self.time_column].unique())[-3]
 
-        train_df = df[df[self.time_column] < oot_start]
-        oot_df = df[df[self.time_column] >= oot_start]
+        train_df = df[df[self.time_column].isin(self.train_month)]
+        oot_df = df[df[self.time_column].isin(self.oot_month)]
 
         print(f"TRN样本数: {len(train_df)}, OOT样本数: {len(oot_df)}")
 
@@ -347,51 +356,35 @@ class AutoFeatureScreener:
         # 保存结果
         if results:
             results_df = pd.DataFrame(results)
-            processed_data = []
+            processed_data = pd.DataFrame(None)
             feature_stats_list  = results
             for feature_dict in feature_stats_list:
                 feature_name = feature_dict['feature']
                 monotonic_train = feature_dict['monotonic_train']
                 monotonic_oot = feature_dict['monotonic_oot']
                 distribution_diff = feature_dict['distribution_diff']
-
                 # 处理训练集统计数据
-                for train_stat in feature_dict['train_stats']:
-                    row = {
-                        'feature': feature_name,
-                        'data_type': 'train',
-                        'monotonic': monotonic_train,
-                        'distribution_diff': distribution_diff,
-                        'bin': train_stat['bin'],
-                        'total': train_stat['total'],
-                        'bad_count': train_stat['bad_count'],
-                        'bad_rate': train_stat['bad_rate'],
-                        'good_count': train_stat['good_count'],
-                        'good_rate': train_stat['good_rate'],
-                        'perc': train_stat['perc'],
-                        'lift': train_stat['lift']
-                    }
-                    processed_data.append(row)
-
+                train_stat = feature_dict['train_stats']
+                train_stat['feature'] = feature_name
+                train_stat['data_type'] = 'train'
+                train_stat['monotonic_train'] = monotonic_train
+                train_stat['distribution_diff'] = distribution_diff
+                train_stat = train_stat.reindex(columns=['feature', 'data_type','bin', 'total', 'bad_count',
+                                                         'bad_rate','good_count', 'good_rate', 'perc', 'lift',
+                                                         'monotonic_train', 'distribution_diff'])
                 # 处理OOT（跨时间）统计数据
-                for oot_stat in feature_dict['oot_stats']:
-                    row = {
-                        'feature': feature_name,
-                        'data_type': 'oot',
-                        'monotonic': monotonic_oot,
-                        'distribution_diff': distribution_diff,
-                        'bin': oot_stat['bin'],
-                        'total': oot_stat['total'],
-                        'bad_count': oot_stat['bad_count'],
-                        'bad_rate': oot_stat['bad_rate'],
-                        'good_count': oot_stat['good_count'],
-                        'good_rate': oot_stat['good_rate'],
-                        'perc': oot_stat['perc'],
-                        'lift': oot_stat['lift']
-                    }
-                    processed_data.append(row)
-            results_df2 = pd.DataFrame(processed_data)
-            results_df2.to_csv(f"{self.config['result_path']}/trn_oot/trn_oot_results.csv", index=False)
+                oot_stat = feature_dict['oot_stats']
+                oot_stat['data_type'] = 'oot'
+                oot_stat['monotonic_oot'] = monotonic_oot
+                oot_stat = oot_stat.reindex(columns=['data_type', 'bin', 'total', 'bad_count',
+                                                     'bad_rate', 'good_count', 'good_rate', 'perc', 'lift',
+                                                     'monotonic_oot'])
+
+                trn_oot_stat = pd.concat([train_stat,oot_stat], axis = 1)
+                processed_data= pd.concat([processed_data, trn_oot_stat], axis=0)
+
+
+            processed_data.to_csv(f"{self.config['result_path']}/trn_oot/trn_oot_results.csv", index=False)
 
             self.results['trn_oot_screening'] = results_df
 
@@ -405,7 +398,7 @@ class AutoFeatureScreener:
             pd.DataFrame({'feature': passed_features}).to_csv(
                 f"{self.config['result_path']}/trn_oot/selected_features_trn_oot.csv", index=False
             )
-
+            self.results['second_passed_features'] = passed_features
             print(f"次筛阶段完成! 原始特征数 {len(selected_features)}，保留特征数 {len(passed_features)}")
         else:
             print("次筛阶段未产生有效结果")
@@ -428,21 +421,40 @@ class AutoFeatureScreener:
                 oot_df['bin'] = combiner.transform(oot_df[[feature]])
             else:
                 # 非评分卡模型：使用OptimalBinning（确保单调性）
-                optb = OptimalBinning(
-                    name=feature,
-                    dtype="numerical" if train_df[feature].dtype in ['float64', 'int64'] else "categorical",
-                    monotonic_trend="auto", # 自动判断单调方向
-                    max_n_bins= 5,
-                    solver="cp"  # 使用整数规划保证单调性
-                )
-                optb.fit(train_df[feature].values, train_df[self.target].values)
-
-                # 应用分箱
-                train_df['bin'] = optb.transform(train_df[feature].values, metric="bins")
-                oot_df['bin'] = optb.transform(oot_df[feature].values, metric="bins")
-
+                # optb = OptimalBinning(
+                #     name=feature,
+                #     dtype="numerical" if train_df[feature].dtype in ['float64', 'int64'] else "categorical",
+                #     monotonic_trend="auto", # 自动判断单调方向
+                #     max_n_bins= 5,
+                #     solver="cp"  # 使用整数规划保证单调性
+                # )
+                # optb.fit(train_df[feature].values, train_df[self.target].values)
+                #
+                # # 应用分箱
+                # train_df['bin'] = optb.transform(train_df[feature].values, metric="bins")
+                # oot_df['bin'] = optb.transform(oot_df[feature].values, metric="bins")
                 # 获取分箱边界
-                bins = optb.splits  # 数值型返回分割点，类别型返回分组
+                # bins = optb.splits  # 数值型返回分割点，类别型返回分组
+
+                # 直接使用等频分箱（10分箱）
+                # 等频分箱（训练集）
+                train_df['bin'], bins = pd.qcut(
+                    train_df[feature],
+                    q=10,
+                    labels=False,
+                    retbins=True,
+                    duplicates='drop'  # 避免重复边界报错
+                )
+
+                # 应用相同的分箱边界到测试集
+                oot_df['bin'] = pd.cut(
+                    oot_df[feature],
+                    bins=bins,
+                    labels=False,
+                    include_lowest=True
+                )
+
+
 
             # 分箱统计计算
             train_stats = self.calculate_bin_stats(train_df, feature)
@@ -461,18 +473,17 @@ class AutoFeatureScreener:
                 woe_oot = self.calculate_woe(oot_stats)
 
             # 可视化
-            self.visualize_bin_results(feature, train_stats, oot_stats)
+            # self.visualize_bin_results(feature, train_stats, oot_stats)
 
             return {
                 'feature': feature,
                 'monotonic_train': 'Yes' if monotonic_train else 'No',
                 'monotonic_oot': 'Yes' if monotonic_oot else 'No',
                 'distribution_diff': self.calculate_distribution_diff(train_stats, oot_stats),
-                'train_stats': train_stats,
-                'oot_stats': oot_stats,
+                'train_stats': pd.DataFrame(train_stats),
+                'oot_stats': pd.DataFrame(oot_stats),
                 'woe_train': woe_train,
                 'woe_oot': woe_oot,
-                'bins': bins  # 返回分箱边界用于审计
             }
 
         except Exception as e:
@@ -498,15 +509,15 @@ class AutoFeatureScreener:
         return stats.to_dict('records')
 
     def check_monotonicity(self, stats):
-        """检查单调性"""
-        bad_rates = [bin['bad_rate'] for bin in stats]
-        n = len(bad_rates)
+        """检查Lift单调性"""
+        lift = [bin['lift'] for bin in stats]
+        n = len(lift)
 
         # 检查单调递增
-        increasing = all(bad_rates[i] <= bad_rates[i + 1] for i in range(n - 1))
+        increasing = all(lift[i] <= lift[i + 1] for i in range(n - 1))
 
         # 检查单调递减
-        decreasing = all(bad_rates[i] >= bad_rates[i + 1] for i in range(n - 1))
+        decreasing = all(lift[i] >= lift[i + 1] for i in range(n - 1))
 
         return increasing or decreasing
 
@@ -601,7 +612,7 @@ class AutoFeatureScreener:
         plt.tight_layout()
 
         # 保存图片
-        output_path = f"{self.config['result_path']}/trn_oot/{feature}_bin_analysis.png"
+        output_path = f"{self.config['result_path']}/trn_oot/fig/{feature}_bin_analysis.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
@@ -613,19 +624,9 @@ class AutoFeatureScreener:
         print("=" * 50)
 
         # 获取次筛选出的特征
-        if not self.results['trn_oot_screening'].empty:
-            selected_features = self.results['trn_oot_screening']['feature'].tolist()
-        elif 'selected_features_trn_oot.csv' in os.listdir(self.config['result_path']):
-            selected_features = pd.read_csv(
-                f"{self.config['result_path']}/selected_features_trn_oot.csv"
-            )['feature'].tolist()
+        if self.results['second_passed_features']:
+            selected_features = self.results['second_passed_features']
         else:
-            print("次筛未选择任何特征，使用初筛特征")
-            selected_features = pd.read_csv(
-                f"{self.config['result_path']}/selected_features_initial.csv"
-            )['feature'].tolist()
-
-        if not selected_features:
             print("无可用特征，跳过终筛阶段")
             return
 
@@ -633,8 +634,8 @@ class AutoFeatureScreener:
         df = self.preprocess_data(self.df.copy())
 
         # 提取年份和月份
-        df['year_month'] = df[self.time_column].dt.to_period('M')
-
+        # df['year_month'] = df[self.time_column].dt.to_period('M')
+        df['year_month'] = df[self.time_column]
         # 对每个特征进行分析
         results = []
         for feature in selected_features:
@@ -645,7 +646,7 @@ class AutoFeatureScreener:
         # 保存结果
         if results:
             results_df = pd.DataFrame(results)
-            results_df.to_csv(f"{self.config['result_path']}/monthly_stability_results.csv", index=False)
+            results_df.to_csv(f"{self.config['result_path']}/monthly/monthly_stability_results.csv", index=False)
             self.results['monthly_stability'] = results_df
 
             # 筛选满足条件的特征
@@ -656,7 +657,7 @@ class AutoFeatureScreener:
                 ]['feature'].tolist()
 
             pd.DataFrame({'feature': passed_features}).to_csv(
-                f"{self.config['result_path']}/final_selected_features.csv", index=False
+                f"{self.config['result_path']}/monthly/final_selected_features.csv", index=False
             )
 
             print(f"终筛阶段完成! 原始特征数 {len(selected_features)}，保留特征数 {len(passed_features)}")
@@ -769,7 +770,7 @@ class AutoFeatureScreener:
             yaxis3=dict(title='均值')
         )
 
-        fig.write_html(f"{self.config['result_path']}/{feature}_monthly_stability.html")
+        fig.write_html(f"{self.config['result_path']}/monthly/fig/{feature}_monthly_stability.html")
 
     def run(self):
         """执行完整的特征筛选流程"""
