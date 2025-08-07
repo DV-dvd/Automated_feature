@@ -35,3 +35,8 @@ pip-wheel-metadata/
 *.psd
 *.ai
 *.eps
+
+# 常见的文件格式
+*.xlsx
+*.xls
+*.csv
