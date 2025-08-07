@@ -56,6 +56,7 @@ class AutoFeatureScreener:
         self.dimensions = self.config['dimensions']
         self.train_month = self.config['train_month']
         self.oot_month = self.config['oot_month']
+        self.monthly_base_month = self.config['monthly_base_month']
 
         # 加载数据
         self.load_data()
@@ -645,8 +646,31 @@ class AutoFeatureScreener:
 
         # 保存结果
         if results:
+            monthly_iv_df = pd.DataFrame(None)
+            monthly_psi_df = pd.DataFrame(None)
+            monthly_mean_df = pd.DataFrame(None)
             results_df = pd.DataFrame(results)
-            results_df.to_csv(f"{self.config['result_path']}/monthly/monthly_stability_results.csv", index=False)
+            for i in range(len(results_df)):
+                feature = results_df.iloc[i]['feature']
+                # 拼接iv
+                tmp_iv_df = pd.DataFrame(pd.DataFrame(results_df.iloc[i]['monthly_stats']).set_index('year_month')['iv']).rename(
+                    columns={'iv': feature}).T
+                monthly_iv_df = pd.concat([monthly_iv_df, tmp_iv_df], axis=0)
+                # 拼接psi
+                tmp_psi_df = pd.DataFrame(
+                    pd.DataFrame(results_df.iloc[i]['monthly_stats']).set_index('year_month')['psi']).rename(
+                    columns={'psi':feature}).T
+                monthly_psi_df = pd.concat([monthly_psi_df, tmp_psi_df], axis=0)
+                # 拼接mean
+                tmp_mean_df = pd.DataFrame(
+                    pd.DataFrame(results_df.iloc[i]['monthly_stats']).set_index('year_month')['mean']).rename(
+                    columns={'mean': feature}).T
+                monthly_mean_df = pd.concat([monthly_mean_df, tmp_mean_df], axis=0)
+            with pd.ExcelWriter(f"{self.config['result_path']}/monthly/monthly_stability_results.xlsx", engine="openpyxl", mode="w") as writer:
+                monthly_iv_df.to_excel(writer, sheet_name="monthly_iv", index=True)
+                monthly_psi_df.to_excel(writer, sheet_name="monthly_psi", index=True)
+                monthly_mean_df.to_excel(writer, sheet_name="monthly_mean", index=True)
+
             self.results['monthly_stability'] = results_df
 
             # 筛选满足条件的特征
@@ -670,8 +694,8 @@ class AutoFeatureScreener:
             monthly_stats = []
             months = sorted(df['year_month'].unique())
 
-            # 基准分布（使用整个训练集）
-            base_df = df[df['year_month'] < months[-1]]  # 排除最近一个月
+            # 基准分布（指定月份）
+            base_df = df[df['year_month'].isin(self.monthly_base_month)]
 
             for month in months:
                 month_df = df[df['year_month'] == month]
@@ -679,8 +703,7 @@ class AutoFeatureScreener:
                     continue
 
                 # 计算IV值
-                iv = toad.quality(month_df[[feature, self.target]], target=self.target, iv_only=True).get(feature,
-                                                                                                          np.nan)
+                iv = toad.quality(month_df[[feature, self.target]], target=self.target, iv_only=True)['iv'].get(feature,np.nan)
 
                 # 计算PSI（与基准分布比较）
                 psi = toad.metrics.PSI(base_df[feature], month_df[feature])
@@ -715,7 +738,7 @@ class AutoFeatureScreener:
                 'iv_std': iv_std,
                 'psi_std': psi_std,
                 'mean_std': mean_std,
-                'monthly_stats': json.dumps(monthly_stats)
+                'monthly_stats': monthly_stats
             }
 
         except Exception as e:
